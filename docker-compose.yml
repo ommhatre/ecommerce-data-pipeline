@@ -1,0 +1,231 @@
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment:
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: 'ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg='
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    PYTHONPATH: /opt/airflow
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./etl:/opt/airflow/etl
+    - ./warehouse:/opt/airflow/warehouse
+    - ./event_generator:/opt/airflow/event_generator
+    - ./.env:/opt/airflow/.env
+  depends_on:
+    redis:
+      condition: service_healthy
+    airflow-postgres:
+      condition: service_healthy
+  networks:
+    - ecommerce-network
+
+services:
+
+  # ─────────────────────────────────────────
+  # ZOOKEEPER
+  # ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────
+  # KAFKA
+  # ─────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────
+  # PROJECT POSTGRESQL
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "admin", "-d", "ecommerce"]
+      interval: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # AIRFLOW POSTGRESQL
+  # ─────────────────────────────────────────
+  airflow-postgres:
+    image: postgres:15
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # REDIS
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # SPARK MASTER
+  # ─────────────────────────────────────────
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+    ports:
+      - "8081:8080"   # Spark Master UI
+      - "7077:7077"   # Spark Master port
+    volumes:
+      - ./spark:/opt/spark-apps
+      - ./spark/jars:/opt/spark-jars
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────
+  # SPARK WORKER
+  # ─────────────────────────────────────────
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_WEBUI_PORT=8081
+    ports:
+      - "8082:8081"   # Spark Worker UI
+    volumes:
+      - ./spark:/opt/spark-apps
+      - ./spark/jars:/opt/spark-jars
+    depends_on:
+      - spark-master
+    networks:
+      - ecommerce-network
+
+  # ─────────────────────────────────────────
+  # AIRFLOW INIT
+  # ─────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin123
+    restart: "no"
+
+  # ─────────────────────────────────────────
+  # AIRFLOW WEBSERVER
+  # ─────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+    restart: always
+
+  # ─────────────────────────────────────────
+  # AIRFLOW SCHEDULER
+  # ─────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: always
+
+  # ─────────────────────────────────────────
+  # AIRFLOW WORKER
+  # ─────────────────────────────────────────
+  airflow-worker:
+    <<: *airflow-common
+    container_name: airflow-worker
+    command: celery worker
+    restart: always
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./etl:/opt/airflow/etl
+      - ./warehouse:/opt/airflow/warehouse
+      - ./event_generator:/opt/airflow/event_generator
+      - ./.env:/opt/airflow/.env
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres_data:
+  airflow_postgres_data:
+
+networks:
+  ecommerce-network:
+    driver: bridge

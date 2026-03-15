@@ -1,0 +1,38 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Environment variables — NEVER commit these
+.env
+
+# Airflow logs
+airflow/logs/
+
+# Spark checkpoints — these are runtime files
+spark/checkpoints/
+
+# Power BI files (binary, not useful in git)
+dashboards/*.pbix
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# Docker volumes
+postgres_data/
+airflow_postgres_data/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
